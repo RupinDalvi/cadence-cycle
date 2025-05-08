@@ -158,41 +158,50 @@
         let lastFilteredAccel={x:0,y:0,z:0}, accelerometerData=[], rpmUpdateIntervalId;
 
         function emaFilter(val, prev, alpha) { return alpha*val + (1-alpha)*prev; }
+
         function handleMotionEvent(e) {
             if (!isMonitoring) return;
-            const acc=e.accelerationIncludingGravity, now=e.timeStamp||Date.now();
-            if (acc.x==null||acc.y==null||acc.z==null) return;
-            const fx=emaFilter(acc.x,lastFilteredAccel.x,EMA_ALPHA);
-            const fy=emaFilter(acc.y,lastFilteredAccel.y,EMA_ALPHA);
-            const fz=emaFilter(acc.z,lastFilteredAccel.z,EMA_ALPHA);
-            lastFilteredAccel={x:fx,y:fy,z:fz};
-            accelerometerData.push({x:fx,y:fy,z:fz,timestamp:now});
-            if (accelerometerData.length>MAX_ACCEL_SAMPLES) accelerometerData.shift();
+            const acc = e.accelerationIncludingGravity;
+            // Always use consistent epoch-based timestamp
+            const now = Date.now();
+            if (acc.x===null||acc.y===null||acc.z===null) return;
+            const fx = emaFilter(acc.x, lastFilteredAccel.x, EMA_ALPHA);
+            const fy = emaFilter(acc.y, lastFilteredAccel.y, EMA_ALPHA);
+            const fz = emaFilter(acc.z, lastFilteredAccel.z, EMA_ALPHA);
+            lastFilteredAccel = { x: fx, y: fy, z: fz };
+            accelerometerData.push({ x: fx, y: fy, z: fz, timestamp: now });
+            if (accelerometerData.length > MAX_ACCEL_SAMPLES) accelerometerData.shift();
+            console.debug('MotionEvent:', fx.toFixed(3), fy.toFixed(3), fz.toFixed(3), now);
         }
 
         function calculateVariance(arr) {
-            if (arr.length<2) return 0;
-            const mean=arr.reduce((a,b)=>a+b)/arr.length;
-            return arr.reduce((a,b)=>a+Math.pow(b-mean,2),0)/(arr.length-1);
+            if (arr.length < 2) return 0;
+            const mean = arr.reduce((a, b) => a + b) / arr.length;
+            return arr.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / (arr.length - 1);
         }
 
         function calculateRpmFromData() {
-            if (accelerometerData.length<10) { currentRpm=0; return; }
-            const now=Date.now(), startTime=now-RPM_CALC_WINDOW_SECONDS*1000;
-            const windowData=accelerometerData.filter(d=>d.timestamp>=startTime);
-            if (windowData.length<20) { currentRpm=0; return; }
-            const duration=(windowData[windowData.length-1].timestamp-windowData[0].timestamp)/1000;
-            if (duration< RPM_CALC_WINDOW_SECONDS*0.5) { currentRpm=0; return; }
-            const axes=[windowData.map(d=>d.x),windowData.map(d=>d.y),windowData.map(d=>d.z)];
-            const variances=axes.map(a=>calculateVariance(a));
-            const dominant=axes[variances.indexOf(Math.max(...variances))];
-            const mean=dominant.reduce((a,b)=>a+b)/dominant.length;
-            let crossings=0;
-            for (let i=1;i<dominant.length;i++) {
-                if ((dominant[i-1]<mean&&dominant[i]>=mean)||(dominant[i-1]>mean&&dominant[i]<=mean)) crossings++;
+            if (accelerometerData.length < 10) { currentRpm = 0; return; }
+            const now = Date.now();
+            const windowStart = now - (RPM_CALC_WINDOW_SECONDS * 1000);
+            const windowData = accelerometerData.filter(d => d.timestamp >= windowStart);
+            if (windowData.length < 20) { currentRpm = 0; return; }
+            const duration = (windowData[windowData.length - 1].timestamp - windowData[0].timestamp) / 1000;
+            if (duration < RPM_CALC_WINDOW_SECONDS * 0.5) { currentRpm = 0; return; }
+            const axes = [windowData.map(d => d.x), windowData.map(d => d.y), windowData.map(d => d.z)];
+            const variances = axes.map(a => calculateVariance(a));
+            const dominant = axes[variances.indexOf(Math.max(...variances))];
+            const mean = dominant.reduce((a, b) => a + b) / dominant.length;
+            let crossings = 0;
+            for (let i = 1; i < dominant.length; i++) {
+                if ((dominant[i-1] < mean && dominant[i] >= mean) || (dominant[i-1] > mean && dominant[i] <= mean)) {
+                    crossings++;
+                }
             }
-            const revolutions=crossings/2;
-            const rawRpm=(revolutions/duration)*60;
+            const revolutions = crossings / 2;
+            const rawRpm = (revolutions / duration) * 60;
+            // Log raw values for debugging
+            console.debug('RPM calc raw:', rawRpm.toFixed(1), 'window size:', windowData.length, 'duration:', duration.toFixed(2));
             // Smooth RPM to reduce jitter
             filteredRpm = emaFilter(rawRpm, filteredRpm, RPM_SMOOTHING_ALPHA);
             currentRpm = Math.round(filteredRpm);
