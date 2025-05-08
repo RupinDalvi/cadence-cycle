@@ -45,9 +45,8 @@ Cadence Cycle Conformer is a browser-based prototype that integrates a YouTube v
 
 ```
 / (root)
-├─ index.html       # Main application UI and logic
+├─ cadence_cycle.html       # Main application UI and logic
 ├─ README.txt       # This documentation file
-└─ assets/          # Currently empty folder for images or styles
 ```
 
 ## Browser Support & Requirements:

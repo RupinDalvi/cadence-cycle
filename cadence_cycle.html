@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cadence Cycle Conformer</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; padding: 15px; max-width: 700px; margin: 0 auto; background-color: #f4f4f4; color: #333; }
+        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; }
+        label { display: block; margin-top: 10px; font-weight: bold; }
+        input[type="text"], input[type="number"] { width: calc(100% - 22px); padding: 10px; margin-top: 5px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        button { background-color: #5cb85c; color: white; padding: 10px 15px; margin-top: 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        button:hover { background-color: #4cae4c; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #player-container { width: 100%; max-width: 560px; height: 315px; margin: 20px auto; background-color: #000; border-radius: 4px; overflow: hidden; }
+        .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 20px; }
+        .status-item { background-color: #e9e9e9; padding: 10px; border-radius: 4px; text-align: center; }
+        .status-item p { margin: 5px 0; font-size: 0.9em; }
+        .status-item span { font-weight: bold; font-size: 1.1em; display: block; }
+        #appStatus { grid-column: 1 / -1; font-weight: bold; color: #d9534f; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Cadence Cycle MVP</h1>
+
+        <div>
+            <label for="youtubeUrl">YouTube Video URL:</label>
+            <input type="text" id="youtubeUrl" placeholder="e.g., https://www.youtube.com/watch?v=T3--I4tAZGw" value="https://www.youtube.com/watch?v=T3--I4tAZGw">
+            <button onclick="loadVideo()">Load Video</button>
+        </div>
+
+        <div id="player-container"></div>
+
+        <div>
+            <label for="targetRpmInput">Target RPM:</label>
+            <input type="number" id="targetRpmInput" value="80">
+        </div>
+
+        <button onclick="startMonitoring()" id="startButton">Start Cadence Monitoring</button>
+        <button onclick="stopMonitoring()" id="stopButton" disabled>Stop Cadence Monitoring</button>
+
+        <div class="status-grid">
+            <div class="status-item">
+                <p>Current RPM:</p>
+                <span id="currentRpmDisplay">0</span>
+            </div>
+            <div class="status-item">
+                <p>Target RPM:</p>
+                <span id="displayTargetRpm">0</span>
+            </div>
+            <div class="status-item">
+                <p>Deviation:</p>
+                <span id="rpmDeviationDisplay">0</span>
+            </div>
+            <div class="status-item">
+                <p>Volume Level:</p>
+                <span id="volumeFactorDisplay">100%</span>
+            </div>
+        </div>
+        <p class="status-item" id="appStatus">Status: Idle. Load video and set target RPM.</p>
+    </div>
+
+    <script>
+        // --- YouTube Player API ---
+        let player;
+        let originalPlayerVolume = 80;
+        const YOUTUBE_API_LOADED_EVENT = 'youtubeApiLoaded';
+
+        const tag = document.createElement('script');
+        tag.src = "https://www.youtube.com/iframe_api";
+        document.getElementsByTagName('script')[0].parentNode.insertBefore(tag, document.getElementsByTagName('script')[0]);
+
+        function onYouTubeIframeAPIReady() {
+            document.dispatchEvent(new Event(YOUTUBE_API_LOADED_EVENT));
+            updateAppStatus("YouTube API Ready. Enter URL and Load Video.");
+        }
+
+        function getVideoIdFromUrl(url) {
+            const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
+            const match = url.match(regex);
+            return match ? match[1] : '';
+        }
+
+        function loadVideo() {
+            const url = ui.youtubeUrl.value;
+            const videoId = getVideoIdFromUrl(url);
+            if (!videoId) return updateAppStatus("Invalid YouTube URL. Please try again.");
+            updateAppStatus(`Loading video ID: ${videoId}...`);
+            if (player) player.destroy();
+            const createPlayer = () => {
+                player = new YT.Player('player-container', {
+                    height: '315', width: '560', videoId,
+                    playerVars: { 'playsinline': 1, 'autoplay': 0, 'controls': 1 },
+                    events: { onReady: onPlayerReady, onError: onPlayerError }
+                });
+            };
+            if (window.YT && YT.Player) createPlayer();
+            else document.addEventListener(YOUTUBE_API_LOADED_EVENT, createPlayer, { once: true });
+        }
+
+        function onPlayerReady(event) {
+            updateAppStatus("Player ready. Set target RPM and start monitoring.");
+            event.target.setVolume(originalPlayerVolume);
+            ui.startButton.disabled = false;
+        }
+
+        function onPlayerError(e) {
+            updateAppStatus(`Player Error: ${e.data}.`);
+            console.error(e);
+        }
+
+        // --- Web Audio API ---
+        let audioCtx, noiseOsc1, noiseOsc2, noiseGainNode;
+        const BASE_NOISE_FREQ = 2000;
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (!noiseGainNode) {
+                noiseGainNode = audioCtx.createGain();
+                noiseGainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+                noiseGainNode.connect(audioCtx.destination);
+            }
+            return true;
+        }
+        function startOrUpdateNoise(level) {
+            if (!audioCtx) return;
+            if (level > 0) {
+                if (!noiseOsc1) {
+                    noiseOsc1 = audioCtx.createOscillator();
+                    noiseOsc1.type = 'sawtooth';
+                    noiseOsc1.frequency.setValueAtTime(BASE_NOISE_FREQ, audioCtx.currentTime);
+                    noiseOsc1.connect(noiseGainNode);
+                    noiseOsc1.start();
+                }
+                if (!noiseOsc2) {
+                    noiseOsc2 = audioCtx.createOscillator();
+                    noiseOsc2.type = 'sawtooth';
+                    noiseOsc2.frequency.setValueAtTime(BASE_NOISE_FREQ * 1.05, audioCtx.currentTime);
+                    noiseOsc2.connect(noiseGainNode);
+                    noiseOsc2.start();
+                }
+                noiseGainNode.gain.linearRampToValueAtTime(level * 0.1, audioCtx.currentTime + 0.1);
+            } else {
+                noiseGainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1);
+                if (noiseOsc1) { noiseOsc1.stop(audioCtx.currentTime + 0.2); noiseOsc1.disconnect(); noiseOsc1 = null; }
+                if (noiseOsc2) { noiseOsc2.stop(audioCtx.currentTime + 0.2); noiseOsc2.disconnect(); noiseOsc2 = null; }
+            }
+        }
+
+        // --- Cadence Measurement ---
+        let isMonitoring = false, targetRpm = 80, currentRpm = 0, filteredRpm = 0;
+        const MAX_ACCEL_SAMPLES = 300;
+        const RPM_CALC_WINDOW_SECONDS = 2;
+        const RPM_UPDATE_INTERVAL_MS = 500;
+        const EMA_ALPHA = 0.3;
+        const RPM_SMOOTHING_ALPHA = 0.2;
+        const ACCEL_AMPLITUDE_THRESHOLD = 0.5;  // Minimum peak-to-peak accel to count
+        let lastFilteredAccel = { x: 0, y: 0, z: 0 };
+        let accelerometerData = [];
+        let rpmUpdateIntervalId;
+
+        function emaFilter(val, prev, alpha) {
+            return alpha * val + (1 - alpha) * prev;
+        }
+
+        function handleMotionEvent(e) {
+            if (!isMonitoring) return;
+            const acc = e.accelerationIncludingGravity;
+            const now = Date.now();
+            if (acc.x === null || acc.y === null || acc.z === null) return;
+            const fx = emaFilter(acc.x, lastFilteredAccel.x, EMA_ALPHA);
+            const fy = emaFilter(acc.y, lastFilteredAccel.y, EMA_ALPHA);
+            const fz = emaFilter(acc.z, lastFilteredAccel.z, EMA_ALPHA);
+            lastFilteredAccel = { x: fx, y: fy, z: fz };
+            accelerometerData.push({ x: fx, y: fy, z: fz, timestamp: now });
+            if (accelerometerData.length > MAX_ACCEL_SAMPLES) accelerometerData.shift();
+        }
+
+        function calculateVariance(arr) {
+            if (arr.length < 2) return 0;
+            const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+            return arr.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / (arr.length - 1);
+        }
+
+        function calculateRpmFromData() {
+            if (accelerometerData.length < 10) { currentRpm = 0; return; }
+            const now = Date.now();
+            const windowStart = now - RPM_CALC_WINDOW_SECONDS * 1000;
+            const windowData = accelerometerData.filter(d => d.timestamp >= windowStart);
+            if (windowData.length < 20) { currentRpm = 0; return; }
+            const duration = (windowData[windowData.length - 1].timestamp - windowData[0].timestamp) / 1000;
+            if (duration < RPM_CALC_WINDOW_SECONDS * 0.5) { currentRpm = 0; return; }
+
+            // Compute peak-to-peak on dominant axis
+            const axes = ['x','y','z'].map(ax => windowData.map(d => d[ax]));
+            const variances = axes.map(a => calculateVariance(a));
+            const dominantIdx = variances.indexOf(Math.max(...variances));
+            const dominantArr = axes[dominantIdx];
+            const maxVal = Math.max(...dominantArr);
+            const minVal = Math.min(...dominantArr);
+            const amplitude = maxVal - minVal;
+            console.debug('Amplitude:', amplitude.toFixed(3));
+            if (amplitude < ACCEL_AMPLITUDE_THRESHOLD) { currentRpm = 0; return; }
+
+            const mean = dominantArr.reduce((a, b) => a + b, 0) / dominantArr.length;
+            let crossings = 0;
+            for (let i = 1; i < dominantArr.length; i++) {
+                if ((dominantArr[i-1] < mean && dominantArr[i] >= mean) || (dominantArr[i-1] > mean && dominantArr[i] <= mean)) {
+                    crossings++;
+                }
+            }
+            const revolutions = crossings / 2;
+            const rawRpm = (revolutions / duration) * 60;
+            console.debug('Raw RPM:', rawRpm.toFixed(1));
+            filteredRpm = emaFilter(rawRpm, filteredRpm, RPM_SMOOTHING_ALPHA);
+            currentRpm = Math.round(filteredRpm);
+        }
+
+        // --- Main Control Logic ---
+        const ui = {
+            youtubeUrl: document.getElementById('youtubeUrl'),
+            targetRpmInput: document.getElementById('targetRpmInput'),
+            startButton: document.getElementById('startButton'),
+            stopButton: document.getElementById('stopButton'),
+            currentRpmDisplay: document.getElementById('currentRpmDisplay'),
+            displayTargetRpm: document.getElementById('displayTargetRpm'),
+            rpmDeviationDisplay: document.getElementById('rpmDeviationDisplay'),
+            volumeFactorDisplay: document.getElementById('volumeFactorDisplay'),
+            appStatus: document.getElementById('appStatus')
+        };
+
+        function updateAppStatus(msg) {
+            ui.appStatus.textContent = `Status: ${msg}`;
+            console.log(msg);
+        }
+
+        function startMonitoring() {
+            if (!player || !player.playVideo) return updateAppStatus("Player not ready. Load a video first.");
+            if (!initAudio()) return;
+            targetRpm = parseInt(ui.targetRpmInput.value, 10);
+            if (isNaN(targetRpm) || targetRpm <= 0) return updateAppStatus("Invalid Target RPM.");
+            ui.displayTargetRpm.textContent = targetRpm;
+            originalPlayerVolume = player.getVolume();
+
+            const startListener = () => {
+                window.addEventListener('devicemotion', handleMotionEvent);
+                proceedWithMonitoringStart();
+            };
+
+            if (typeof DeviceMotionEvent.requestPermission === 'function') {
+                DeviceMotionEvent.requestPermission()
+                    .then(state => state === 'granted' ? startListener() : updateAppStatus("Motion permission denied."))
+                    .catch(() => updateAppStatus("Error requesting motion permission."));
+            } else startListener();
+        }
+
+        function proceedWithMonitoringStart() {
+            isMonitoring = true;
+            accelerometerData = [];
+            filteredRpm = 0;
+            player.playVideo();
+            updateAppStatus(`Monitoring started. Target RPM: ${targetRpm}.`);
+            ui.startButton.disabled = true;
+            ui.stopButton.disabled = false;
+            rpmUpdateIntervalId = setInterval(() => {
+                calculateRpmFromData();
+                adjustAudioFeedback();
+                ui.currentRpmDisplay.textContent = currentRpm;
+            }, RPM_UPDATE_INTERVAL_MS);
+        }
+
+        function stopMonitoring() {
+            isMonitoring = false;
+            window.removeEventListener('devicemotion', handleMotionEvent);
+            clearInterval(rpmUpdateIntervalId);
+            startOrUpdateNoise(0);
+            if (player.setVolume) player.setVolume(originalPlayerVolume);
+            ui.currentRpmDisplay.textContent = '0';
+            ui.rpmDeviationDisplay.textContent = '0';
+            ui.volumeFactorDisplay.textContent = '100%';
+            updateAppStatus("Monitoring stopped.");
+            ui.startButton.disabled = false;
+            ui.stopButton.disabled = true;
+        }
+
+        function adjustAudioFeedback() {
+            if (!player || !isMonitoring) return;
+            const diff = Math.abs(currentRpm - targetRpm);
+            ui.rpmDeviationDisplay.textContent = `${currentRpm - targetRpm}`;
+            let volumeFactor = 1,
+                noiseLevel = 0;
+            if (diff >= 5) { volumeFactor = 0.2; if (currentRpm < targetRpm) noiseLevel = 0.3; }
+            else if (diff >= 4) { volumeFactor = 0.5; if (currentRpm < targetRpm) noiseLevel = 0.2; }
+            else if (diff >= 3) { volumeFactor = 0.75; if (currentRpm < targetRpm) noiseLevel = 0.1; }
+            const targetVol = Math.max(0, Math.min(100, Math.round(originalPlayerVolume * volumeFactor)));
+            player.setVolume(targetVol);
+            startOrUpdateNoise(noiseLevel);
+            ui.volumeFactorDisplay.textContent = `${Math.round(volumeFactor * 100)}%`;
+        }
+
+        // Initial setup
+        ui.startButton.disabled = true;
+        updateAppStatus("Page loaded. Waiting for YouTube API...");
+    </script>
+</body>
+</html>
